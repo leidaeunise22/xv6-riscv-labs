@@ -40,3 +40,8 @@ void free(void*);
 int atoi(const char*);
 int memcmp(const void *, const void *, uint);
 void *memcpy(void *, const void *, uint);
+
+struct pstat;
+int getprocs(struct pstat*);
+int getpriority(void);
+int setpriority(int);

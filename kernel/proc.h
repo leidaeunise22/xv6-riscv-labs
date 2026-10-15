@@ -80,7 +80,7 @@ struct trapframe {
   /* 280 */ uint64 t6;
 };
 
-enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
+#include "pstat.h"
 
 // Per-process state
 struct proc {
@@ -91,6 +91,8 @@ struct proc {
   void *chan;                  // If non-zero, sleeping on chan
   int killed;                  // If non-zero, have been killed
   int xstate;                  // Exit status to be returned to parent's wait
+  int priority;                // Base priority, 0 through 49
+  uint readytime;              // Tick when last made runnable
   int pid;                     // Process ID
 
   // wait_lock must be held when using this:

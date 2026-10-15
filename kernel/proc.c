@@ -119,6 +119,8 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->priority = 0;
+  p->readytime = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -242,6 +244,7 @@ userinit(void)
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
 
+  p->readytime = ticks;
   p->state = RUNNABLE;
 
   release(&p->lock);
@@ -288,6 +291,7 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+  np->priority = p->priority;
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
@@ -312,6 +316,7 @@ fork(void)
   release(&wait_lock);
 
   acquire(&np->lock);
+  np->readytime = ticks;
   np->state = RUNNABLE;
   release(&np->lock);
 
@@ -445,6 +450,45 @@ scheduler(void)
     // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
 
+#if SCHED_POLICY == PRIORITY
+    struct proc *best = 0;
+    int bestpriority = -1;
+    // One CPU: keep interrupts off so the ready queue stays unchanged.
+    // Avoid tickslock here: timer wakeup takes tickslock before p->lock.
+    push_off();
+#if AGING
+    uint now = ticks;
+#endif
+    for(p = proc; p < &proc[NPROC]; p++){
+      acquire(&p->lock);
+      if(p->state == RUNNABLE){
+        int effective = p->priority;
+#if AGING
+        uint age = now - p->readytime;
+        if(age > MAXEFFPRIORITY - effective)
+          effective = MAXEFFPRIORITY;
+        else
+          effective += age;
+#endif
+        if(effective > bestpriority){
+          best = p;
+          bestpriority = effective;
+        }
+      }
+      release(&p->lock);
+    }
+    if(best){
+      acquire(&best->lock);
+      pop_off();
+      best->state = RUNNING;
+      c->proc = best;
+      swtch(&c->context, &best->context);
+      c->proc = 0;
+      release(&best->lock);
+    } else {
+      pop_off();
+    }
+#else
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if(p->state == RUNNABLE) {
@@ -461,6 +505,7 @@ scheduler(void)
       }
       release(&p->lock);
     }
+#endif
   }
 }
 
@@ -497,6 +542,7 @@ yield(void)
 {
   struct proc *p = myproc();
   acquire(&p->lock);
+  p->readytime = ticks;
   p->state = RUNNABLE;
   sched();
   release(&p->lock);
@@ -565,6 +611,7 @@ wakeup(void *chan)
     if(p != myproc()){
       acquire(&p->lock);
       if(p->state == SLEEPING && p->chan == chan) {
+        p->readytime = ticks;
         p->state = RUNNABLE;
       }
       release(&p->lock);
@@ -586,6 +633,7 @@ kill(int pid)
       p->killed = 1;
       if(p->state == SLEEPING){
         // Wake process from sleep().
+        p->readytime = ticks;
         p->state = RUNNABLE;
       }
       release(&p->lock);
@@ -653,4 +701,37 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+// Copy one entry at a time to avoid a large array on the kernel stack.
+int
+getprocs(uint64 addr)
+{
+  struct proc *p;
+  struct pstat info;
+  int count = 0;
+  acquire(&wait_lock);
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state != UNUSED){
+      memset(&info, 0, sizeof(info));
+      info.pid = p->pid;
+      info.state = p->state;
+      info.size = p->sz;
+      info.ppid = p->parent ? p->parent->pid : 0;
+      safestrcpy(info.name, p->name, sizeof(info.name));
+      info.priority = p->priority;
+      info.readytime = p->readytime;
+      if(copyout(myproc()->pagetable, addr + count * sizeof(info),
+                 (char *)&info, sizeof(info)) < 0){
+        release(&p->lock);
+        release(&wait_lock);
+        return -1;
+      }
+      count++;
+    }
+    release(&p->lock);
+  }
+  release(&wait_lock);
+  return count;
 }
